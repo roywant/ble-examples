@@ -16,52 +16,54 @@
 
 #include "UIDFrame.h"
 
-UIDFrame::UIDFrame(void)
-{
-    memset(uidNamespaceID, 0, sizeof(UIDNamespaceID_t));
-    memset(uidInstanceID,  0,  sizeof(UIDInstanceID_t));
+UIDFrame::UIDFrame(void) {
 }
 
-UIDFrame::UIDFrame(const UIDNamespaceID_t uidNamespaceIDIn, const UIDInstanceID_t  uidInstanceIDIn)
-{
-    memcpy(uidNamespaceID, uidNamespaceIDIn, sizeof(UIDNamespaceID_t));
-    memcpy(uidInstanceID,  uidInstanceIDIn,  sizeof(UIDInstanceID_t));
+void UIDFrame::clearFrame(uint8_t* frame) {
+    frame[FRAME_LEN_OFFSET] = 0; // Set frame length to zero to clear it
 }
 
-void UIDFrame::setUIDData(const UIDNamespaceID_t &uidNamespaceIDIn, const UIDInstanceID_t &uidInstanceIDIn)
-{
-    memcpy(uidNamespaceID, uidNamespaceIDIn, sizeof(UIDNamespaceID_t));
-    memcpy(uidInstanceID,  uidInstanceIDIn,  sizeof(UIDInstanceID_t));
-}
-
-void UIDFrame::constructUIDFrame(uint8_t *rawFrame, int8_t advPowerLevel)
-{
+void UIDFrame::setData(uint8_t *rawFrame, int8_t advTxPower, const uint8_t* uidData) {
     size_t index = 0;
+    rawFrame[index++] = UID_HEADER_LEN + UID_LENGTH;            // UID length + overhead of four bytes below
+    rawFrame[index++] = EDDYSTONE_UUID[0];                      // LSB 16-bit Eddystone UUID (little endian)
+    rawFrame[index++] = EDDYSTONE_UUID[1];                      // MSB
+    rawFrame[index++] = FRAME_TYPE_UID;                         // 1B  Type
+    rawFrame[index++] = advTxPower;                             // 1B  Power @ 0meter
 
-    rawFrame[index++] = EDDYSTONE_UUID[0];                                   // 16-bit Eddystone UUID
-    rawFrame[index++] = EDDYSTONE_UUID[1];
-    rawFrame[index++] = FRAME_TYPE_UID;                                      // 1B  Type
-    rawFrame[index++] = advPowerLevel;                                       // 1B  Power @ 0meter
-
-    memcpy(rawFrame + index, uidNamespaceID, sizeof(UIDNamespaceID_t));      // 10B Namespace ID
-    index += sizeof(UIDNamespaceID_t);
-    memcpy(rawFrame + index, uidInstanceID, sizeof(UIDInstanceID_t));        // 6B Instance ID
-    index += sizeof(UIDInstanceID_t);
-
-    memset(rawFrame + index, 0, 2 * sizeof(uint8_t));                        // 2B RFU, which are unused
+    memcpy(rawFrame + index, uidData, UID_LENGTH);              // UID = 10B NamespaceID + 6B InstanceID
 }
 
-size_t UIDFrame::getRawFrameSize(void) const
-{
-    return FRAME_SIZE_UID + EDDYSTONE_UUID_SIZE;
+uint8_t* UIDFrame::getData(uint8_t* rawFrame) {
+    return &(rawFrame[UID_DATA_OFFSET]);
 }
 
-uint8_t* UIDFrame::getUIDNamespaceID(void)
+uint8_t  UIDFrame::getDataLength(uint8_t* rawFrame)
 {
-    return uidNamespaceID;
+    return rawFrame[FRAME_LEN_OFFSET] - EDDYSTONE_UUID_LEN;
 }
 
-uint8_t* UIDFrame::getUIDInstanceID(void)
+uint8_t* UIDFrame::getAdvFrame(uint8_t* rawFrame)
 {
-    return uidInstanceID;
+    return &(rawFrame[ADV_FRAME_OFFSET]);
+}
+
+uint8_t UIDFrame::getAdvFrameLength(uint8_t* rawFrame)
+{
+    return rawFrame[FRAME_LEN_OFFSET];
+}
+
+uint8_t* UIDFrame::getUid(uint8_t* rawFrame)
+{
+    return &(rawFrame[UID_VALUE_OFFSET]);
+}
+
+uint8_t UIDFrame::getUidLength(uint8_t* rawFrame)
+{
+    return rawFrame[FRAME_LEN_OFFSET] - UID_HEADER_LEN;
+}
+
+void UIDFrame::setAdvTxPower(uint8_t* rawFrame, int8_t advTxPower)
+{
+    rawFrame[UID_TXPOWER_OFFSET] = advTxPower;
 }

@@ -18,6 +18,7 @@
 #define __TLMFRAME_H__
 
 #include "EddystoneTypes.h"
+#include "aes_eax.h"
 
 /**
  * Class that encapsulates data that belongs to the Eddystone-TLM frame. For
@@ -59,15 +60,75 @@ public:
      * @param[in] rawFrame
      *              Pointer to the location where the raw frame will be stored.
      */
-    void constructTLMFrame(uint8_t *rawFrame);
+    void setData(uint8_t *rawFrame);
+    
+    /**
+     * Construct the encrypted bytes of the Eddystone-ETLM frame that will be directly
+     * used in the advertising packets.
+     *
+     * @param[in] rawFrame
+     *              Pointer to the location where the raw frame will be stored.
+     * @param[in] eidIdentityKey
+     *              Pointer to the eidIdentityKey in use
+     * @param[in] rotationPeriodExp
+     *              Rotation exponent for EID
+     * @param[in] beaconTimeSecs
+     *              Time in seconds since beacon boot.
+     */
+    void encryptData(uint8_t* rawFrame, uint8_t* eidIdentityKey, uint8_t rotationPeriodExp, uint32_t beaconTimeSecs);
 
     /**
      * Get the size of the Eddystone-TLM frame constructed with the
      * current state of the TLMFrame object.
+     * 
+     * @param[in] rawFrame
+     *              Pointer to the location where the raw frame will be stored.
      *
      * @return The size in bytes of the Eddystone-TLM frame.
      */
-    size_t getRawFrameSize(void) const;
+    size_t getRawFrameSize(uint8_t* rawFrame);
+    
+    
+    /**
+     * Get the TLM frame data from the Eddystone-TLM frame.
+     * 
+     * @param[in] rawFrame
+     *              Pointer to the location where the raw frame will be stored.
+     *
+     * @return A pointer to the bytes of the Eddystone-TLM frame data.
+     */
+    uint8_t* getData(uint8_t* rawFrame);
+    
+    /**
+     * Get the length of the TLM frame data from the Eddystone-TLM frame.
+     * 
+     * @param[in] rawFrame
+     *              Pointer to the location where the raw frame will be stored.
+     *
+     * @return The size in bytes of the Eddystone-TLM frame.
+     */
+    uint8_t  getDataLength(uint8_t* rawFrame);
+    
+    /**
+     * Get the TLM Adv data from the Eddystone-TLMframe.
+     * This is the full service data included in the BLE service data params
+     * 
+     * @param[in] rawFrame
+     *              Pointer to the location where the raw frame will be stored.
+     *
+     * @return A pointer to the bytes of the Eddystone-TLM Adv frame data.
+     */
+    uint8_t* getAdvFrame(uint8_t* rawFrame);
+    
+    /**
+     * Get the length of the TLM Adv data from the Eddystone-TLMframe.
+     * 
+     * @param[in] rawFrame
+     *              Pointer to the location where the raw frame will be stored.
+     *
+     * @return The size in bytes of the Eddystone-TLM Adv frame data.
+     */
+    uint8_t getAdvFrameLength(uint8_t* rawFrame);
 
     /**
      * Update the time since boot.
@@ -118,16 +179,72 @@ public:
      * @return The TLM Version number.
      */
     uint8_t getTLMVersion(void) const;
-
-private:
+    
     /**
      * The byte ID of an Eddystone-TLM frame.
      */
     static const uint8_t FRAME_TYPE_TLM = 0x20;
+    
+    /**
+    * The verison number of the Telemetry packets being used
+    */
+    static const uint8_t DEFAULT_TLM_VERSION = 0;
+
     /**
      * The size of an Eddystone-TLM frame.
      */
     static const uint8_t FRAME_SIZE_TLM = 14;
+    /**
+     * The size of an Eddystone-ETLM frame.
+     */
+    static const uint8_t FRAME_SIZE_ETLM = (FRAME_SIZE_TLM + 4);
+
+    // Nonce
+    static const uint8_t ETLM_NONCE_LEN = 6;
+    // Version
+    static const uint8_t VERSION_OFFSET = 4;
+    static const uint8_t TLM_VERSION = 0x00;
+    static const uint8_t ETLM_VERSION = 0x01;
+    // Data
+    static const uint8_t DATA_OFFSET = 5;
+    static const uint8_t TLM_DATA_LEN = 12;
+    static const uint8_t ETLM_DATA_LEN = 16;
+    // Salt
+    static const uint8_t SALT_OFFSET = 12;
+    static const uint8_t SALT_LEN = 2;
+    // Message Integrity Check
+    static const uint8_t MIC_OFFSET = 14;
+    static const uint8_t MIC_LEN = 2;
+    // Return codes
+    static const int ETLM_NONCE_INVALID_LEN = -1;
+
+    /**
+     * Constructs 6 byte (48-bit) Nonce from an empty array, rotationExp and beacon time (secs) 
+     *
+     * @param[in] nonce
+     *              the input and target nonce[] array
+     * @param[in] rotationPeriodExp
+     *              Rotation exponent for EID
+     * @param[in] beaconTimeSecs
+     *              Time in seconds since beacon boot.
+     * @return[out] return code (success = 0)
+     */
+    int generateEtlmNonce(uint8_t* nonce, uint8_t rotatePeriodExp, uint32_t beaconTimeSecs);
+
+
+private:
+
+    /**
+     * The size (in bytes) of an Eddystone-EID frame.
+     * This is the some of the Eddystone UUID(2 bytes), FrameType, AdvTxPower,
+     * EID Value
+     */
+    // static const uint8_t TLM_FRAME_LEN = 16;
+    // static const uint8_t ETLM_FRAME_LEN = 20;
+    static const uint8_t FRAME_LEN_OFFSET = 0;
+    static const uint8_t EDDYSTONE_UUID_LEN = 2; 
+    static const uint8_t TLM_DATA_OFFSET = 3;
+    static const uint8_t ADV_FRAME_OFFSET = 1;
 
     /**
      * Eddystone-TLM version value.
@@ -153,6 +270,7 @@ private:
      * Eddystone-TLM time since boot with 0.1 second resolution.
      */
     uint32_t             tlmTimeSinceBoot;
-};
 
+
+};
 #endif  /* __TLMFRAME_H__ */

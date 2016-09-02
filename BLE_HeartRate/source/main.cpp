@@ -19,7 +19,8 @@
 #include "ble/Gap.h"
 #include "ble/services/HeartRateService.h"
 
-DigitalOut led1(LED1, 1);
+DigitalOut led1(P0_13, 1);
+DigitalOut col(P0_4,0);
 
 const static char     DEVICE_NAME[] = "HRM";
 static const uint16_t uuid16_list[] = {GattService::UUID_HEART_RATE_SERVICE};
@@ -93,6 +94,5 @@ void bleInitComplete(BLE::InitializationCompleteCallbackContext *params)
 void app_start(int, char **)
 {
     minar::Scheduler::postCallback(periodicCallback).period(minar::milliseconds(500));
-
     BLE::Instance().init(bleInitComplete);
 }

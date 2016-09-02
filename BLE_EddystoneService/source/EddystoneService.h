@@ -16,13 +16,21 @@
 
 #ifndef __EDDYSTONESERVICE_H__
 #define __EDDYSTONESERVICE_H__
-
+//
+// 2016-03 Eddystone Unified GATT
+//
+#include "EventQueue/EventQueue.h"
 #include "ble/BLE.h"
 #include "EddystoneTypes.h"
-#include "URLFrame.h"
 #include "UIDFrame.h"
+#include "URLFrame.h"
 #include "TLMFrame.h"
+#include "EIDFrame.h"
 #include <string.h>
+#include "mbedtls/aes.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+
 #ifdef YOTTA_CFG_MBED_OS
     #include "mbed-drivers/mbed.h"
     #include "mbed-drivers/CircularBuffer.h"
@@ -31,21 +39,8 @@
     #include "CircularBuffer.h"
 #endif
 
-#ifndef YOTTA_CFG_EDDYSTONE_DEFAULT_URL_FRAME_INTERVAL
-    #define YOTTA_CFG_EDDYSTONE_DEFAULT_URL_FRAME_INTERVAL 700
-#endif
-
-#ifndef YOTTA_CFG_EDDYSTONE_DEFAULT_UID_FRAME_INTERVAL
-    #define YOTTA_CFG_EDDYSTONE_DEFAULT_UID_FRAME_INTERVAL 300
-#endif
-
-#ifndef YOTTA_CFG_EDDYSTONE_DEFAULT_TLM_FRAME_INTERVAL
-    #define YOTTA_CFG_EDDYSTONE_DEFAULT_TLM_FRAME_INTERVAL 2000
-#endif
-
-#ifndef YOTTA_CFG_EDDYSTONE_DEFAULT_EDDYSTONE_URL_CONFIG_ADV_INTERVAL
-    #define YOTTA_CFG_EDDYSTONE_DEFAULT_EDDYSTONE_URL_CONFIG_ADV_INTERVAL 1000
-#endif
+#include "stdio.h"
+#include "Eddystone_config.h"
 
 /**
  * This class implements the Eddystone-URL Config Service and the Eddystone
@@ -59,28 +54,18 @@ public:
      * Total number of GATT Characteristics in the Eddystonei-URL Configuration
      * Service.
      */
-    static const uint16_t TOTAL_CHARACTERISTICS = 9;
+    static const uint16_t TOTAL_CHARACTERISTICS = 12;
+    
+    /**
+     * Max data that can be written to the data characteristic
+     */
+    static const uint8_t MAX_DATA_WRITE = 34; // FrameType+32B(IdentityKey)+Exp
 
     /**
      * Default interval for advertising packets for the Eddystone-URL
      * Configuration Service.
      */
-    static const uint32_t DEFAULT_CONFIG_PERIOD_MSEC    = YOTTA_CFG_EDDYSTONE_DEFAULT_EDDYSTONE_URL_CONFIG_ADV_INTERVAL;
-    /**
-     * Recommended interval for advertising packets containing Eddystone URL
-     * frames.
-     */
-    static const uint16_t DEFAULT_URL_FRAME_PERIOD_MSEC = YOTTA_CFG_EDDYSTONE_DEFAULT_URL_FRAME_INTERVAL;
-    /**
-     * Recommended interval for advertising packets containing Eddystone UID
-     * frames.
-     */
-    static const uint16_t DEFAULT_UID_FRAME_PERIOD_MSEC = YOTTA_CFG_EDDYSTONE_DEFAULT_UID_FRAME_INTERVAL;
-    /**
-     * Recommended interval for advertising packets containing Eddystone TLM
-     * frames.
-     */
-    static const uint16_t DEFAULT_TLM_FRAME_PERIOD_MSEC = YOTTA_CFG_EDDYSTONE_DEFAULT_TLM_FRAME_INTERVAL;
+    static const uint32_t DEFAULT_CONFIG_PERIOD_MSEC    = EDDYSTONE_DEFAULT_CONFIG_ADV_INTERVAL;
 
     /**
      * Enumeration that defines the various operation modes of the
@@ -121,96 +106,110 @@ public:
      */
     struct EddystoneParams_t {
         /**
+         * A buffer describing the capabilities of the beacon
+         */
+        Capability_t            capabilities;
+
+         /**
+         * Defines the slot that advInterval, radioPower, advPower, advSlotData operate on
+         */
+        uint8_t                 activeSlot;
+
+        /**
+         * The Beacon interval for each beacon slot
+         *
+         * @note A value of zero disables Eddystone-URL frame trasmissions.
+         */
+        SlotAdvIntervals_t      slotAdvIntervals;
+
+         /**
+         * The Radio TX Powers supported by this beacon
+         */
+        PowerLevels_t           radioTxPowerLevels;
+
+         /**
+         * The Radio TX Power set for each slot
+         */
+        SlotTxPowerLevels_t     slotRadioTxPowerLevels;
+
+        /**
+         * The Calibrated Adv TX Powers supported by this beacon (one for each radio power)
+         */
+        PowerLevels_t           advTxPowerLevels;
+
+        /**
+         * The Adv TX Power set for each slot
+         */
+        SlotTxPowerLevels_t     slotAdvTxPowerLevels;
+
+        /**
          * The value of the Eddystone-URL Configuration Service Lock State
          * characteristic.
          */
-        bool             lockState;
-        /**
-         * The value of the Eddystone-URL Configuration Service Lock
-         * characteristic that can be used to lock the beacon and set the
-         * single-use lock-code.
-         */
-        Lock_t           lock;
+        uint8_t                 lockState;
+
         /**
          * The value of the Eddystone-URL Configuration Service Unlock
          * characteristic that can be used to unlock the beacon and clear the
          * single-use lock-code.
          */
-        Lock_t           unlock;
+        Lock_t                  unlockToken;
+
         /**
-         * The value of the Eddystone-URL Configuration Service Flags
-         * characteristic. This value is currently fixed to 0x10.
+         * An array holding the 128-bit unlockKey (big endian)
          */
-        uint8_t          flags;
+        Lock_t                  unlockKey;
+
         /**
-         * The value of the Eddystone-URL Configuration Service Advertised TX
-         * Power Levels characteristic that is an array of bytes whose values
-         * are put into the advertising packets when in EDDYSTONE_BEACON_MODE.
-         *
-         * @note These are not the same values set internally into the radio tx
-         *       power.
+         * An array holding the 128-bit challenge (big endian) in the
+         * challenge/response unlock protocol
          */
-        PowerLevels_t    advPowerLevels;
+        Lock_t                  challenge;
+
         /**
-         * The value of the Eddystone-URL Configuration Service TX Power Mode
-         * characteristic. This value is an index into the
-         * EddystoneParams_t::advPowerLevels array.
+         * EID: An array holding the 256-bit private Ecdh Key (big endian)
          */
-        uint8_t          txPowerMode;
+        //PrivateEcdhKey_t        privateEcdhKey;
+
         /**
-         * The value of the Eddystone-URL Configuration Service Beacon Period
-         * characteristic that is the interval (in milliseconds) of the
-         * Eddystone-URL frames.
-         *
-         * @note A value of zero disables Eddystone-URL frame trasmissions.
+         * EID: An array holding the 256-bit public Ecdh Key (big endian)
          */
-        uint16_t         urlFramePeriod;
+        //PublicEcdhKey_t         publicEcdhKey;
+
         /**
-         * The configured interval (in milliseconds) of the Eddystone-UID
-         * frames.
-         *
-         * @note A value of zero disables Eddystone-UID frame transmissions.
-         *
-         * @note Currently it is only possible to modify this value by using
-         *       the setUIDFrameAdvertisingInterval() API.
+         * EID: An array holding the slot next rotation times
          */
-        uint16_t         uidFramePeriod;
+        //SlotEidNextRotationTimes_t      slotEidNextRotationTimes;
+
         /**
-         * The configured interval (in milliseconds) of the Eddystone-TLM
-         * frames.
-         *
-         * @note A value of zero disables Eddystone-TLM frame transmissions.
-         *
-         * @note Currently it is only possible to modify this value by using
-         *       the setTLMFrameAdvertisingInterval() API.
+         * EID: An array holding the slot rotation period exponents
          */
-        uint16_t         tlmFramePeriod;
+        SlotEidRotationPeriodExps_t     slotEidRotationPeriodExps;
+
         /**
-         * The configured version of the Eddystone-TLM frames.
+         * EID: An array holding the slot 128-bit EID Identity Key (big endian)
          */
-        uint8_t          tlmVersion;
+        SlotEidIdentityKeys_t           slotEidIdentityKeys;
+
         /**
-         * The length of the encoded URL in EddystoneParams_t::urlData used
-         * within Eddystone-URL frames.
+         * Specifies the type of each frame indexed by slot
          */
-        uint8_t          urlDataLength;
+        SlotFrameTypes_t    slotFrameTypes;
+
         /**
-         * The value of the Eddystone-URL Configuration Service URI Data
-         * characteristic that contains an encoded URL as described in the
-         * Eddystone Specification at
-         * https://github.com/google/eddystone/blob/master/eddystone-url/README.md#eddystone-url-http-url-encoding.
+         * A buffer that contains all slot frames, 32-bytes allocated to each frame
          */
-        UrlData_t        urlData;
+        SlotStorage_t       slotStorage;
+
+         /**
+         * The state of the recently invoked Factory Reset characteristic
+         */
+        uint8_t          factoryReset;
+
         /**
-         * The configured 10-byte namespace ID in Eddystone-UID frames that may
-         * be used to group a particular set of beacons.
+         * The state of the recently invoked Remain Connectable characteristic
          */
-        UIDNamespaceID_t uidNamespaceID;
-        /**
-         * The configured 6-byte instance ID that may be used to uniquely
-         * identify individual devices in a group.
-         */
-        UIDInstanceID_t  uidInstanceID;
+        uint8_t          remainConnectable;
     };
 
     /**
@@ -245,35 +244,32 @@ public:
      */
     enum FrameType {
         /**
-         * The Eddystone-URL frame. Refer to
-         * https://github.com/google/eddystone/tree/master/eddystone-url.
-         */
-        EDDYSTONE_FRAME_URL,
-        /**
-         * The Eddystone-URL frame. Refer to
+         * The Eddystone-UID frame. Refer to
          * https://github.com/google/eddystone/tree/master/eddystone-uid.
          */
         EDDYSTONE_FRAME_UID,
         /**
          * The Eddystone-URL frame. Refer to
+         * https://github.com/google/eddystone/tree/master/eddystone-url.
+         */
+        EDDYSTONE_FRAME_URL,
+        /**
+         * The Eddystone-TLM frame. Refer to
          * https://github.com/google/eddystone/tree/master/eddystone-tlm.
          */
         EDDYSTONE_FRAME_TLM,
+        /**
+         * The Eddystone-EID frame. Refer to
+         * https://github.com/google/eddystone/tree/master/eddystone-eid.
+         */
+        EDDYSTONE_FRAME_EID,
         /**
          * The total number Eddystone frame types.
          */
         NUM_EDDYSTONE_FRAMES
     };
 
-    /**
-     * The size of the advertising frame queue.
-     *
-     * @note [WARNING] If the advertising rate for any of the frames is higher
-     *       than 100ms then frames will be dropped, this value must be
-     *       increased.
-     */
-    static const uint16_t ADV_FRAME_QUEUE_SIZE = NUM_EDDYSTONE_FRAMES;
-
+    typedef eq::EventQueue event_queue_t;
 
     /**
      * Constructor that Initializes the EddystoneService using parameters from
@@ -287,6 +283,8 @@ public:
      *              The input Eddystone configuration parameters.
      * @param[in] radioPowerLevelsIn
      *              The value set internally into the radion tx power.
+     * @param[in] eventQueue
+     *              The event queue used by the service to schedule tasks.
      * @param[in] advConfigIntervalIn
      *              The advertising interval for advertising packets of the
      *              Eddystone-URL Configuration Service.
@@ -294,6 +292,7 @@ public:
     EddystoneService(BLE                 &bleIn,
                      EddystoneParams_t   &paramsIn,
                      const PowerLevels_t &radioPowerLevelsIn,
+                     event_queue_t       &eventQueue,
                      uint32_t            advConfigIntervalIn = DEFAULT_CONFIG_PERIOD_MSEC);
 
     /**
@@ -306,18 +305,32 @@ public:
      *              Power Mode characteristic.
      * @param[in] radioPowerLevelsIn
      *              The value set internally into the radion tx power.
+     * @param[in] eventQueue
+     *              The event queue used by the service to schedule tasks.
      * @param[in] advConfigIntervalIn
      *              The advertising interval for advertising packets of the
      *              Eddystone-URL Configuration Service.
      *
      * @note When using this constructor the setURLData(), setTMLData() and
-     *       setUIDData() functions must be called to initialize
+     *       setUIDData() and setEIDData() functions must be called to initialize
      *       EddystoneService manually.
      */
     EddystoneService(BLE                 &bleIn,
                      const PowerLevels_t &advPowerLevelsIn,
                      const PowerLevels_t &radioPowerLevelsIn,
+                     event_queue_t       &eventQueue,
                      uint32_t            advConfigIntervalIn = DEFAULT_CONFIG_PERIOD_MSEC);
+                     
+          
+    /**
+     * Generate the EID Beacon Random ECHD Keys (private and Public)
+     */                  
+    void genEIDBeaconKeys(void);                
+
+    /**
+     * Factory Reset all parameters in the beacon
+     */
+    void doFactoryReset(void);
 
     /**
      * Setup callback to update BatteryVoltage in Eddystone-TLM frames
@@ -336,69 +349,6 @@ public:
     void onTLMBeaconTemperatureUpdate(TlmUpdateCallback_t tlmBeaconTemperatureCallbackIn);
 
     /**
-     * Set the Eddystone-TLM frame version. The other components of
-     * Eddystone-TLM frames are updated just before the frame is broadcast
-     * since information such as beacon temperature and time since boot changes
-     * relatively quickly.
-     *
-     * @param[in] tlmVersionIn
-     *              The Eddyston-TLM version to set.
-     */
-    void setTLMData(uint8_t tlmVersionIn = 0);
-
-    /**
-     * Set the Eddystone-URL frame URL data.
-     *
-     * @param[in] urlDataIn
-     *              A pointer to the plain null terminated string representing
-     *              a URL to be encoded.
-     */
-    void setURLData(const char *urlDataIn);
-
-    /**
-     * Set the Eddystone-UID namespace and instance IDs.
-     *
-     * @param[in] uidNamespaceIDIn
-     *              The new Eddystone-UID namespace ID.
-     * @param[in] uidInstanceIDIn
-     *              The new Eddystone-UID instance ID.
-     */
-    void setUIDData(const UIDNamespaceID_t &uidNamespaceIDIn, const UIDInstanceID_t &uidInstanceIDIn);
-
-    /**
-     * Set the interval of the Eddystone-URL frames.
-     *
-     * @param[in] urlFrameIntervalIn
-     *              The new frame interval in milliseconds. The default is
-     *              DEFAULT_URL_FRAME_PERIOD_MSEC.
-     *
-     * @note A value of zero disables Eddystone-URL frame transmissions.
-     */
-    void setURLFrameAdvertisingInterval(uint16_t urlFrameIntervalIn = DEFAULT_URL_FRAME_PERIOD_MSEC);
-
-    /**
-     * Set the interval of the Eddystone-UID frames.
-     *
-     * @param[in] uidFrameIntervalIn
-     *              The new frame interval in milliseconds. The default is
-     *              DEFAULT_UID_FRAME_PERIOD_MSEC.
-     *
-     * @note A value of zero disables Eddystone-UID frame transmissions.
-     */
-    void setUIDFrameAdvertisingInterval(uint16_t uidFrameIntervalIn = DEFAULT_UID_FRAME_PERIOD_MSEC);
-
-    /**
-     * Set the interval for the Eddystone-TLM frames.
-     *
-     * @param[in] tlmFrameIntervalIn
-     *              The new frame interval in milliseconds. The default is
-     *              DEFAULT_TLM_FRAME_PERIOD_MSEC.
-     *
-     * @note A value of zero desables Eddystone-TLM frames.
-     */
-    void setTLMFrameAdvertisingInterval(uint16_t tlmFrameIntervalIn = DEFAULT_TLM_FRAME_PERIOD_MSEC);
-
-    /**
      * Change the EddystoneService OperationMode to EDDYSTONE_MODE_CONFIG.
      *
      * @retval EDDYSTONE_ERROR_NONE if the operation succeeded.
@@ -413,7 +363,8 @@ public:
     EddystoneError_t startConfigService(void);
 
     /**
-     * Change the EddystoneService OperationMode to EDDYSTONE_MODE_BEACON.
+     * Change the EddystoneService to start transmitting Eddystone beacons
+     * operationMode = EDDYSTONE_MODE_BEACON
      *
      * @retval EDDYSTONE_ERROR_NONE if the operation succeeded.
      * @retval EDDYSONE_ERROR_INVALID_ADVERTISING_INTERVAL if the configured
@@ -424,21 +375,7 @@ public:
      *       are freed and the BLE instance shutdown before the new operation
      *       mode is configured.
      */
-    EddystoneError_t startBeaconService(void);
-
-    /**
-     * Change the EddystoneService OperationMode to EDDYSTONE_MODE_NONE.
-     *
-     * @retval EDDYSTONE_ERROR_NONE if the operation succeeded.
-     * @retval EDDYSTONE_ERROR_INVALID_STATE if the state of the
-     *         EddystoneService already is EDDYSTONE_MODE_NONE.
-     *
-     * @note If EddystoneService was previously in EDDYSTONE_MODE_CONFIG or
-     *       EDDYSTONE_MODE_BEACON, then the resources allocated to that mode
-     *       of operation such as memory are freed and the BLE instance
-     *       shutdown before the new operation mode is configured.
-     */
-    EddystoneError_t stopCurrentService(void);
+    EddystoneError_t startEddystoneBeaconAdvertisements(void);
 
     /**
      * Set the Comple Local Name for the BLE device. This not only updates
@@ -478,24 +415,91 @@ public:
      */
     void getEddystoneParams(EddystoneParams_t &params);
 
-private:
     /**
-     * Helper function used only once during construction of an
-     * EddystoneService object to avoid duplicated code.
-     *
-     * @param[in] advPowerLevelsIn
-     *              The value of the Eddystone-URL Configuration Service TX
-     *              Power Mode characteristic.
-     * @param[in] radioPowerLevelsIn
-     *              The value set internally into the radion tx power.
-     * @param[in] advConfigIntervalIn
-     *              The advertising interval for advertising packets of the
-     *              Eddystone-URL Configuration Service.
+     * Start advertising packets indicating the Eddystone Configuration state
+     * operationMode = EDDYSTONE_MODE_CONFIG
      */
-    void eddystoneConstructorHelper(const PowerLevels_t &advPowerLevelsIn,
-                                    const PowerLevels_t &radioPowerLevelsIn,
-                                    uint32_t            advConfigIntervalIn);
+    EddystoneService::EddystoneError_t startEddystoneConfigAdvertisements(void);
 
+    /**
+     * Free the resources acquired by a call to setupBeaconService() and
+     * cancel all pending callbacks that operate the radio and frame queue.
+     *
+     * @note This call will not modify the current state of the BLE device.
+     *       EddystoneService::stopBeaconService should only be called after
+     *       a call to BLE::shutdown().
+     */
+    void stopEddystoneBeaconAdvertisements(void);
+
+    /**
+     * Initialize and start the BLE Eddystone Configuration Service
+     * This will create the 12-characteristics of the service and make them
+     * available when a client connects
+     */
+    void startEddystoneConfigService();
+
+    /**
+     * Stops the Eddystone Configuration Service and frees its resources
+     * and cancels all pending callbacks that operate the radio and frame queue.
+     *
+     * @note This call will not modify the current state of the BLE device.
+     *       EddystoneService::stopBeaconService should only be called after
+     *       a call to BLE::shutdown().
+     */
+    void stopEddystoneConfigService();
+    
+    /**
+     * Print an array as a set of hex values 
+     *
+     * @param[in] a
+     *              The array to be printed.
+     * 
+     * @param[in] len
+     *              The length of the array.
+     *
+     * @return void
+     *
+     */
+    static void logPrintHex(uint8_t* a, int len);
+    
+    /**
+     * Swaps the endianess of an array ptrIn[size] to ptrOut[size]
+     *
+     * @param[in] *ptrIn
+     *              The input array
+     * @param[in] *ptrOut
+     *              The output array
+     * @param[in] size
+     *              The sizes of the arrays (num bytes to be reversed)
+     */
+    static void swapEndianArray(uint8_t *ptrIn, uint8_t *ptrOut, int size);
+    
+    /**
+     * Generate a random array of bytes of length size
+     *
+     * @param[in] *ain
+     *              The input/output array
+     * @param[in] size
+     *              The size of the array in bytes
+     */
+    static void generateRandom(uint8_t *ain, int size);
+    
+    /**
+     * Timer that keeps track of the time since boot.
+     */
+
+    static Timer        timeSinceBootTimer;
+    
+private:
+
+    static const uint8_t NO_EID_SLOT_SET = 0xff;
+     
+    static const uint8_t UNDEFINED_FRAME_FORMAT = 0xff;
+     
+    static const uint8_t REMAIN_CONNECTABLE_SET = 0x01;
+          
+    static const uint8_t REMAIN_CONNECTABLE_UNSET = 0x00;
+     
     /**
      * Helper funtion that will be registered as an initialization complete
      * callback when BLE::shutdown() is called. This is necessary when changing
@@ -514,10 +518,10 @@ private:
      * advertising payload to contain the information related to the specified
      * FrameType.
      *
-     * @param[in] frameType
-     *              The frame to populate the advertising payload with.
+     * @param[in] slot
+     *              The slot to populate the advertising payload with.
      */
-    void swapAdvertisedFrame(FrameType frameType);
+    void swapAdvertisedFrame(int slot);
 
     /**
      * Helper function that manages the BLE radio that is used to broadcast
@@ -536,15 +540,15 @@ private:
     void manageRadio(void);
 
     /**
-     * Regular callbacks posted at the rate of urlFramePeriod, uidFramePeriod
-     * and tlmFramePeriod milliseconds enqueue frames to be advertised. If the
+     * Regular callbacks posted at the rate of slotAdvPeriod[slot] milliseconds
+     * enqueue frames to be advertised. If the
      * frame queue is currently empty, then this function directly calls
      * manageRadio() to broadcast the required FrameType.
      *
      * @param[in] frameType
      *              The FrameType to enqueue for broadcasting.
      */
-    void enqueueFrame(FrameType frameType);
+    void enqueueFrame(int slot);
 
     /**
      * Helper function that updates the advertising payload when in
@@ -565,47 +569,24 @@ private:
      * often because the Eddystone-TLM frame Time Since Boot must have a 0.1
      * seconds resolution according to the Eddystone specification.
      */
-    void updateRawTLMFrame(void);
+    void updateRawTLMFrame(uint8_t* frame);
 
     /**
-     * Initialize the resources required when switching to
-     * EDDYSTONE_MODE_BEACON.
+     * Calculate the Frame pointer from the slot number
      */
-    void setupBeaconService(void);
+    uint8_t* slotToFrame(int slot);
 
     /**
-     * Initialize the resources required when switching to
-     * EDDYSTONE_MODE_CONFIG. This includes the GATT services and
-     * characteristics required by the Eddystone-URL Configuration Service.
-     */
-    void setupConfigService(void);
-
-    /**
-     * Free the resources acquired by a call to setupConfigService().
+     * Free the characteric resources acquired by a call to
+     * startEddystoneConfigService().
      */
     void freeConfigCharacteristics(void);
-
-    /**
-     * Free the resources acquired by a call to setupBeaconService() and
-     * cancel all pending callbacks that operate the radio and frame queue.
-     *
-     * @note This call will not modify the current state of the BLE device.
-     *       EddystoneService::stopBeaconService should only be called after
-     *       a call to BLE::shutdown().
-     */
-    void stopBeaconService(void);
 
     /**
      * Helper function used to update the GATT database following any
      * change to the internal state of the service object.
      */
     void updateCharacteristicValues(void);
-
-    /**
-     * Setup the payload of advertising packets for Eddystone-URL Configuration
-     * Service.
-     */
-    void setupEddystoneConfigAdvertisements(void);
 
     /**
      * Helper function to setup the payload of scan response packets for
@@ -615,45 +596,162 @@ private:
 
     /**
      * Callback registered to the BLE API to authorize write operations to the
-     * Eddystone-URL Configuration Service Lock characteristic.
+     * Eddystone Configuration Service Lock characteristic.
      *
      * @param[in] authParams
      *              Write authentication information.
      */
-    void lockAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
+    void writeLockAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
 
     /**
      * Callback registered to the BLE API to authorize write operations to the
-     * Eddystone-URL Configuration Service Unlock characteristic.
+     * Eddystone Configuration Service Unlock characteristic.
      *
      * @param[in] authParams
      *              Write authentication information.
      */
-    void unlockAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
+    void writeUnlockAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
 
     /**
      * Callback registered to the BLE API to authorize write operations to the
-     * Eddystone-URL Configuration Service URI Data characteristic.
+     * Eddystone Configuration Service advSlotData characteristic.
      *
      * @param[in] authParams
      *              Write authentication information.
      */
-    void urlDataWriteAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
-
-    void powerModeAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
+    void writeVarLengthDataAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
 
     /**
      * Callback registered to the BLE API to authorize write operations to the
-     * following Eddystone-URL Configuration Service characteristics:
-     * - Flags
-     * - Beacon Period
-     * - Reset
+     * lockState characteristic which can be 1 byte or 17 bytes long.
+     *
+     * @param[in] authParams
+     *              Write authentication information.
+     */
+    void writeLockStateAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
+
+    /**
+     * Callback registered to the BLE API to authorize write operations to simple fixed length
+     * value characteristic types.
      *
      * @param[in] authParams
      *              Write authentication information.
      */
     template <typename T>
-    void basicAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
+    void writeBasicAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
+
+    /**
+     * This callback is invoked when a GATT client attempts to write to the
+     * Active Slot characteristic of the service.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    template <typename T>
+    void writeActiveSlotAuthorizationCallback(GattWriteAuthCallbackParams *authParams);
+
+    /**
+     * READ AUTHORIZATIONS
+     */
+
+    /**
+     * This callback is invoked when a GATT client attempts to read from a
+     * basic characteristic of the Eddystone Configuration Service, which
+     * is blocked if the beacon lock is set to LOCKED.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    void readBasicTestLockAuthorizationCallback(GattReadAuthCallbackParams *authParams);
+    
+    /**
+     * This callback is invoked when a GATT client attempts to read from the
+     * EidIdentityKey characteristic of the Eddystone Configuration Service,
+     * which is blocked if the beacon lock is set to LOCKED, or the key has not
+     * been set/initialized.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    void readEidIdentityAuthorizationCallback(GattReadAuthCallbackParams *authParams);
+    
+    /**
+     * This callback is invoked when a GATT client attempts to read from the
+     * PublicEcdhKey characteristic of the Eddystone Configuration Service,
+     * which is blocked if the beacon lock is set to LOCKED, or the key has not
+     * been set/initialized.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    void readPublicEcdhKeyAuthorizationCallback(GattReadAuthCallbackParams *authParams);
+    
+
+    /**
+     * This callback is invoked when a GATT client attempts to read from the
+     * Adv Slot Data characteristic of the Eddystone Configuration Service,
+     * which isblocked if the beacon lock is set to LOCKED.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    void readDataAuthorizationCallback(GattReadAuthCallbackParams *authParams);
+    
+    /**
+     * Checks if this is valid frame data (i.e. length > 0)
+     *
+     * @param[in] frame
+     *              The frame being tested
+     * @returns   frame is valid or not.
+     */
+    bool testValidFrame(uint8_t* frame);
+
+    /**
+     * This callback is invoked when a GATT client attempts to read the challenge
+     * from the Unlock characteristic of the Eddystone Configuration Service,
+     * which is blocked if the beacon lock is set to UNLOCKED.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    void readUnlockAuthorizationCallback(GattReadAuthCallbackParams *authParams);
+
+    /**
+     * This callback is invoked when a GATT client attempts to read from the
+     * Radio Tx Power characteristic of the Eddystone Configuration Service,
+     * which is blocked if the beacon lock is set to LOCKED.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    void readRadioTxPowerAuthorizationCallback(GattReadAuthCallbackParams *authParams);
+
+    /**
+     * This callback is invoked when a GATT client attempts to read from the
+     * Radio Tx Power characteristic of the Eddystone Configuration Service,
+     * which is blocked if the beacon lock is set to LOCKED.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    void readAdvTxPowerAuthorizationCallback(GattReadAuthCallbackParams *authParams);
+
+    /**
+     * This callback is invoked when a GATT client attempts to read from the
+     * Adv Interval characteristic of the Eddystone Configuration Service,
+     * which is blocked if the beacon lock is set to LOCKED.
+     *
+     * @param[in] authParams
+     *              Information about the values that are being read.
+     */
+    void readAdvIntervalAuthorizationCallback(GattReadAuthCallbackParams *authParams);
+
+    /**
+     * Calculates the index in the radio power levels array which can be used
+     * to index into the adv power levels array to find the calibrated adv power
+     * used in the adv frame.
+     */
+    uint8_t radioTxPowerToIndex(int8_t txPower);
 
     /**
      * This callback is invoked when a GATT client attempts to modify any of the
@@ -664,6 +762,53 @@ private:
      *              Information about the values that are being written.
      */
     void onDataWrittenCallback(const GattWriteCallbackParams *writeParams);
+
+    /**
+     * Sets the power for the frame in a particular slot using the
+     * adv tx power parmeter
+     *
+     * @param[in] slot
+     *              The the current slot number being considered
+     * @param[in] advTxPower
+     *              The adv power required in a frame
+     */
+    void setFrameTxPower(uint8_t slot, int8_t advTxPower);
+
+    /**
+     * AES128 ECB Encrypts a 16-byte input array with a key, to an output array
+     *
+     * @param[in] *key
+     *              The encryption key
+     * @param[in] *input
+     *              The input array
+     * @param[in] *output
+     *              The output array (contains the encrypted data)
+     */
+    void aes128Encrypt(uint8_t *key, uint8_t *input, uint8_t *output);
+
+    /**
+     * AES128 ECB Deccrypts a 16-byte input array with a key, to an output array
+     *
+     * @param[in] *key
+     *              The decryption key
+     * @param[in] *input
+     *              The input array
+     * @param[in] *output
+     *              The output array (containing the decrypted data)
+     */
+    void aes128Decrypt(uint8_t *key, uint8_t *input, uint8_t *output);
+
+
+
+    /**
+     * Swaps the endianess of a 16-bit unsigned int
+     *
+     * @param[in] arg
+     *              The value with the byte order to be reversed
+     *
+     * @return The resulting 16-bit value with byte order reversed
+     */
+    uint16_t swapEndian(uint16_t arg);
 
     /**
      * Correct the advertising interval for non-connectable packets.
@@ -679,11 +824,29 @@ private:
      *       - Gap::getMaxAdvertisingInterval()
      */
     uint16_t correctAdvertisementPeriod(uint16_t beaconPeriodIn) const;
+    
+    /**
+     * Swaps the endianess of a 16-bit unsigned int
+     *
+     * @param[in] arg
+     *              The value with the byte order to be reversed
+     *
+     * @return The resulting 16-bit value with byte order reversed
+     */
+    void setRandomMacAddress(void);     
+    
+    /**
+     * Finds the first EID slot set
+     *
+     * @return slot number (and if not, returns NO_EID_SLOT_SET = -1)
+     */
+    int getEidSlot(void);
 
     /**
      * BLE instance that EddystoneService will operate on.
      */
     BLE                                                             &ble;
+
     /**
      * The advertising interval for Eddystone-URL Config Service advertising
      * packets.
@@ -693,147 +856,254 @@ private:
      * Current EddystoneServce operation mode.
      */
     uint8_t                                                         operationMode;
+    
+    int                                                             genBeaconKeyRC;
 
     /**
-     * Encapsulation of a URL frame.
+     * GATT Service Variables
      */
-    URLFrame                                                        urlFrame;
+
     /**
-     * Encapsulation of a UID frame.
+     * An array describing the capabilites of the beacon.
+     */
+    Capability_t                                                    capabilities;
+
+    /**
+     * The currenty defined active slot.
+     */
+    uint8_t                                                         activeSlot;
+
+    /**
+     * An array containing all the adv intervals for each slot index
+     */
+    SlotAdvIntervals_t                                              slotAdvIntervals;
+
+    /**
+     * The value of the Eddystone Configuration Service radioTX Power
+     * characteristic.
+     */
+    SlotTxPowerLevels_t                                             slotRadioTxPowerLevels;
+
+    /**
+     * An array containing the supported radio tx power levels for this beacon
+     */
+    PowerLevels_t                                                   radioTxPowerLevels;
+
+    /**
+     * An array containing all possible values for advertised tx power in Eddystone
+     * slots.
+     */
+    SlotTxPowerLevels_t                                             slotAdvTxPowerLevels;
+
+    /**
+     * An array containing the supported adv tx power levels for this beacon
+     */
+    PowerLevels_t                                                   advTxPowerLevels;
+
+    /**
+     * The value of the Eddystone Configuration Service Lock State
+     * characteristic.
+     */
+    uint8_t                                                         lockState;
+
+
+    /**
+     * The value of the Eddystone Configuration Service Lock State
+     * buffer
+     */
+    LockState_t                                                     lockStateBuf;
+
+    /**
+     * The value of the Eddystone Configuration Service unlock key
+     */
+    Lock_t                                                          unlockKey;
+
+    /**
+     * The value of the Eddystone Configuration Service unlock challenge
+     */
+    Lock_t                                                          challenge;
+
+   /**
+     * The value of the Eddystone Configuration Service unlock token. A write
+     * to the unlock characteristic must contain this token to unlock the beacon
+     */
+    Lock_t                                                          unlockToken;
+
+
+    /**
+     * EID: An array holding the 256-bit private Ecdh Key (big endian)
+     */
+    PrivateEcdhKey_t                                                privateEcdhKey;
+
+    /**
+     * EID: An array holding the 256-bit public Ecdh Key (big endian)
+     */
+    PublicEcdhKey_t                                                 publicEcdhKey;
+    
+    /**
+     * EID: An array holding the 256-bit public Ecdh Key (little endian)
+     */
+    PublicEcdhKey_t                                                 publicEcdhKeyLE;
+
+    /**
+     * EID: An array holding the slot rotation period exponents
+     */
+    SlotEidRotationPeriodExps_t                                     slotEidRotationPeriodExps;
+
+    /**
+     * EID: An array holding the slot Eid Identity Keys
+     */
+    SlotEidIdentityKeys_t                                           slotEidIdentityKeys;
+
+    /**
+     * EID: An array holding the slot Eid Public Ecdh Keys
+     */
+    //SlotEidPublicEcdhKeys_t                                         slotEidPublicEcdhKeys;
+
+    /**
+     * Instance of the UID frame.
      */
     UIDFrame                                                        uidFrame;
+
     /**
-     * Encapsulation of a TLM frame.
+     * Instance of the URL frame.
+     */
+    URLFrame                                                        urlFrame;
+
+    /**
+     * Instance of the TLM frame.
      */
     TLMFrame                                                        tlmFrame;
 
     /**
-     * The value set internally into the radion tx power.
+     * Instance of the EID frame.
      */
-    PowerLevels_t                                                   radioPowerLevels;
-    /**
-     * An array containing possible values for advertised tx power in Eddystone
-     * frames. Also, the value of the Eddystone-URL Configuration Service
-     * Advertised TX Power Levels characteristic.
-     */
-    PowerLevels_t                                                   advPowerLevels;
-    /**
-     * The value of the Eddystone-URL Configuration Service Lock State
-     * characteristic.
-     */
-    bool                                                            lockState;
-    /**
-     * The value of the Eddystone-URL Configuration Service reset
-     * characteristic.
-     */
-    bool                                                            resetFlag;
-    /**
-     * The value of the Eddystone-URL Configuration Service Lock
-     * characteristic.
-     */
-    Lock_t                                                          lock;
-    /**
-     * The value of the Eddystone-URL Configuration Service Unlock
-     * characteristic.
-     */
-    Lock_t                                                          unlock;
-    /**
-     * The value of the Eddystone-URL Configuration Service Flags
-     * characteristic.
-     */
-    uint8_t                                                         flags;
-    /**
-     * The value of the Eddystone-URL Configuration Service TX Power Mode
-     * characteristic.
-     */
-    uint8_t                                                         txPowerMode;
-    /**
-     * The value of the Eddystone-URL Configuration Service Beacon Period
-     * characteristic. Also, the advertising interval (in milliseconds) of
-     * Eddystone-URL frames.
-     */
-    uint16_t                                                        urlFramePeriod;
-    /**
-     * The advertising interval (in milliseconds) of Eddystone-UID frames.
-     */
-    uint16_t                                                        uidFramePeriod;
-    /**
-     * The advertising interval (in milliseconds) of Eddystone-TLM frames.
-     */
-    uint16_t                                                        tlmFramePeriod;
+    EIDFrame                                                        eidFrame;
 
     /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
+     * The value of the Eddystone Configuration Service reset
+     * characteristic.
+     */
+    uint8_t                                                         factoryReset;
+
+    /**
+     * The value of the Eddystone Configuration Service Remain Connectable
+     * characteristic.
+     */
+    uint8_t                                                         remainConnectable;
+
+    /**
+     * CHARACTERISTIC STORAGE
+     */
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone
+     * Configuration Service Capabilities characteristic.
+     */
+    ReadOnlyArrayGattCharacteristic<uint8_t, sizeof(Capability_t)>  *capabilitiesChar;
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone
+     * Configuration Service Active Slot characteristic.
+     */
+    ReadWriteGattCharacteristic<uint8_t>                            *activeSlotChar;
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone
+     * Configuration Service Adv Interval characteristic.
+     */
+    ReadWriteGattCharacteristic<uint16_t>                           *advIntervalChar;
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone
+     * Configuration Service Radio Tx Power characteristic.
+     */
+    ReadWriteGattCharacteristic<int8_t>                             *radioTxPowerChar;
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone
+     * Configuration Service Adv Tx Power characteristic.
+     */
+    ReadWriteGattCharacteristic<int8_t>                             *advTxPowerChar;
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone
      * Configuration Service Lock State characteristic.
      */
-    ReadOnlyGattCharacteristic<bool>                                *lockStateChar;
-    /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
-     * Configuration Service Lock characteristic.
-     */
-    WriteOnlyArrayGattCharacteristic<uint8_t, sizeof(Lock_t)>       *lockChar;
-    /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
-     * Configuration Service Unlock characteristic.
-     */
-    WriteOnlyArrayGattCharacteristic<uint8_t, sizeof(Lock_t)>       *unlockChar;
-    /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
-     * Configuration Service URI Data characteristic.
-     */
-    GattCharacteristic                                              *urlDataChar;
-    /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
-     * Configuration Service Flags characteristic.
-     */
-    ReadWriteGattCharacteristic<uint8_t>                            *flagsChar;
-    /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
-     * Configuration Service Advertised TX Power Levels characteristic.
-     */
-    ReadWriteArrayGattCharacteristic<int8_t, sizeof(PowerLevels_t)> *advPowerLevelsChar;
-    /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
-     * Configuration Service TX Power Mode characteristic.
-     */
-    ReadWriteGattCharacteristic<uint8_t>                            *txPowerModeChar;
-    /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
-     * Configuration Service Beacon Period characteristic.
-     */
-    ReadWriteGattCharacteristic<uint16_t>                           *beaconPeriodChar;
-    /**
-     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
-     * Configuration Service Reset characteristic.
-     */
-    WriteOnlyGattCharacteristic<bool>                               *resetChar;
+    GattCharacteristic                                               *lockStateChar;
 
     /**
-     * Pointer to the raw bytes that will be used to populate Eddystone-URL
-     * frames.
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone
+     * Configuration Service Unlock characteristic.
      */
-    uint8_t                                                         *rawUrlFrame;
+    ReadWriteArrayGattCharacteristic<uint8_t, sizeof(Lock_t)>       *unlockChar;
+
     /**
-     * Pointer to the raw bytes that will be used to populate Eddystone-UID
-     * frames.
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone
+     * Configuration Service Public ECDH Key characteristic.
      */
-    uint8_t                                                         *rawUidFrame;
+    GattCharacteristic                                              *publicEcdhKeyChar;
+
     /**
-     * Pointer to the raw bytes that will be used to populate Eddystone-TLM
-     * frames.
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
+     * Configuration Service EID Identity Key characteristic.
      */
-    uint8_t                                                         *rawTlmFrame;
+    GattCharacteristic                                              *eidIdentityKeyChar;
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
+     * Configuration Service Adv Slot Data characteristic.
+     */
+    GattCharacteristic                                              *advSlotDataChar;
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone-URL
+     * Configuration Service Factory Reset characteristic.
+     */
+    WriteOnlyGattCharacteristic<uint8_t>                            *factoryResetChar;
+
+    /**
+     * Pointer to the BLE API characteristic encapsulation for the Eddystone-GATT
+     * Configuration Service Remain Connectable characteristic.
+     */
+    ReadWriteGattCharacteristic<uint8_t>                            *remainConnectableChar;
+
+    /**
+     * END OF GATT CHARACTERISTICS
+     */
+
+    /**
+     * EID: An array holding the slot next rotation times
+     */
+    SlotEidNextRotationTimes_t                                      slotEidNextRotationTimes;
+
+    /**
+     * EID: Storage for the current slot encrypted EID Identity Key
+     */
+    EidIdentityKey_t                                                encryptedEidIdentityKey;
+
+    /*
+     * Storage for all the slots / frames
+     */
+    SlotStorage_t                                                   slotStorage;
+
+    /**
+     * An array that defines the frame type of each slot using the slot number
+     * as an index.
+     */
+    SlotFrameTypes_t                                                slotFrameTypes;
 
     /**
      * Circular buffer that represents of Eddystone frames to be advertised.
      */
-    CircularBuffer<FrameType, ADV_FRAME_QUEUE_SIZE>                 advFrameQueue;
+    CircularBuffer<uint8_t, MAX_ADV_SLOTS>                          advFrameQueue;
 
     /**
      * The registered callback to update the Eddystone-TLM frame Battery
      * Voltage.
      */
     TlmUpdateCallback_t                                             tlmBatteryVoltageCallback;
+
     /**
      * The registered callback to update the Eddystone-TLM frame Beacon
      * Temperature.
@@ -841,32 +1111,19 @@ private:
     TlmUpdateCallback_t                                             tlmBeaconTemperatureCallback;
 
     /**
-     * Timer that keeps track of the time since boot.
+     * Type for the array of callback handles for all the slot timers
      */
-    Timer                                                           timeSinceBootTimer;
+    typedef event_queue_t::event_handle_t SlotCallbackHandles_t[MAX_ADV_SLOTS];
 
     /**
-     * Minar callback handle to keep track of periodic
-     * enqueueFrame(EDDYSTONE_FRAME_UID) callbacks that populate the
-     * advFrameQueue.
+     * An array of all the slot timer callbacks handles
      */
-    minar::callback_handle_t                                        uidFrameCallbackHandle;
+    SlotCallbackHandles_t                                           slotCallbackHandles;
+
     /**
-     * Minar callback handle to keep track of periodic
-     * enqueueFrame(EDDYSTONE_FRAME_URL) callbacks that populate the
-     * advFrameQueue.
+     * Callback handle to keep track of manageRadio() callbacks.
      */
-    minar::callback_handle_t                                        urlFrameCallbackHandle;
-    /**
-     * Minar callback handle to keep track of periodic
-     * enqueueFrame(EDDYSTONE_FRAME_TLM) callbacks that populate the
-     * advFrameQueue.
-     */
-    minar::callback_handle_t                                        tlmFrameCallbackHandle;
-    /**
-     * Minar callback handle to keep track of manageRadio() callbacks.
-     */
-    minar::callback_handle_t                                        radioManagerCallbackHandle;
+    event_queue_t::event_handle_t                                   radioManagerCallbackHandle;
 
     /**
      * GattCharacteristic table used to populate the BLE ATT table in the
@@ -878,6 +1135,36 @@ private:
      * Pointer to the device name currently being used.
      */
     const char                                                      *deviceName;
+
+    /**
+     * Defines an array of string constants (a container) used to initialise any URL slots
+     */
+    static const char* const slotDefaultUrls[];
+
+    /**
+     * Defines an array of UIDs to initialize UID slots
+     */
+    static const uint8_t slotDefaultUids[MAX_ADV_SLOTS][16];
+
+    /**
+     * Defines an array of EID (Identity keys) to initialize EID slots
+     */
+    static const uint8_t slotDefaultEidIdentityKeys[MAX_ADV_SLOTS][16];
+
+    /**
+     * Defines default EID payload before being updated with the first EID rotation value
+     */
+    static const uint8_t allSlotsDefaultEid[8];
+
+    /**
+     * Reference to the event queue used to post tasks
+     */
+    event_queue_t&                  eventQueue;
+    
+    /**
+     * Next EID slot frame that will be transmitted
+     */
+    uint8_t                         nextEidSlot;                     
 };
 
 #endif  /* __EDDYSTONESERVICE_H__ */
